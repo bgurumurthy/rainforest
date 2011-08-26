@@ -5,14 +5,18 @@ if sys.version_info < (2, 7):
 	raise Exception('Required python 2.7 or newer')
 
 from argparse import ArgumentParser
+#from boto import ec2
+import boto.ec2
 
 ####### MAIN #######
 if __name__ == '__main__':
-	parser = ArgumentParser(description='Network performance between EC2 instances')
+	parser = ArgumentParser(description='nothing')
 	parser.add_argument('--access-key', required=True, help='AWS Access Key')
 	parser.add_argument('--secret-key', required=True, help='AWS Secret Key')
 	parser.add_argument('--version', action='version', version='0.0.1')
 	args = parser.parse_args()
 
-	print args
+regions = boto.ec2.regions()
+print regions
 
+#conn = ec2.EC2Connection(args.access_key, args.secret_key)
