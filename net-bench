@@ -79,17 +79,17 @@ def create_instance(ec2, hash, instancetype, image, keyname, secgroup, zone,
 				instance_type = instancetype, 
 				placement = zone, 
 				instance_initiated_shutdown_behavior = 'terminate')
+	time.sleep(3)
 	instance = reserv.instances[0]
 	if wait:
 		print "Waiting instance %s to be running" % instance
 		while not instance.update() == 'running':
 			time.sleep(1)
-		wait_ssh_init(instance)
 	instance.add_tag('Name', 'iperf_%s' % hash)
 	return instance
 
 def terminate_instance(instance, wait=True):
-	print "Terminating instance %s" % instance.dns_name
+	print "Terminating instance %s" % instance
 	instance.terminate()
 	if wait:
 		print "Waiting instance %s to be terminated" % instance
@@ -105,49 +105,45 @@ def ssh_exec(ssh, cmd, wait=True):
 		status = channel.recv_exit_status()
 	return (stdout, stderr, status)
 
-def iperf(client, key, server):
-	ssh = paramiko.SSHClient()
-	ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-	print "Installing iperf on server %s" % server
-	ssh.connect(server, username='ubuntu', key_filename=key)
+def install_iperf(ssh):
 	stdout, stderr, status = ssh_exec(ssh, 'TERM=vt100 sudo apt-get install -qy iperf')
-	print "Starting iperf on server %s" % server
+	return status
+
+def start_iperf_server(ssh):
 	stdout, stderr, status = ssh_exec(ssh, 'iperf -D -s', wait=False)
-	print "Installing iperf on client %s" % client
-	ssh.connect(client, username='ubuntu', key_filename=key)
-	stdout, stderr, status = ssh_exec(ssh, 'TERM=vt100 sudo apt-get install -qy iperf')
-	print status
-	print "Calling iperf from %s to %s" % (client, server)
+
+def iperf(ssh, server):
 	stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
 	return int(stdout.read().strip().split(',')[-1])
 
 # TODO: fix this - not working 100%
 # Change to ssh trials since console output takes long to be available
-def wait_cloud_init(instance):
-	print "Waiting instance %s to be ready" % instance
-	match = None
-	while match == None:
-		out = instance.get_console_output().output
-		match = re.search('cloud-init boot finished', out)
-		time.sleep(1)
+#def wait_cloud_init(instance):
+#	print "Waiting instance %s to be ready" % instance
+#	match = None
+#	while match == None:
+#		out = instance.get_console_output().output
+#		match = re.search('cloud-init boot finished', out)
+#		time.sleep(1)
 
-def wait_ssh_init(instance):
-	print "Waiting instance %s to have ssh started" % instance.dns_name
+def wait_ssh_init(instance, key):
+	print "Waiting instance %s to have ssh started" % instance
 	ssh = paramiko.SSHClient()
 	ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 	while True:
 		try:
-			ssh.connect(instance.dns_name, username='ubuntu', key_filename=key)
+			ssh.connect(instance.dns_name, username='ubuntu', 
+				key_filename=key, timeout=2)
+			ssh.get_transport().set_keepalive(5)
 			stdout, stderr, status = ssh_exec(ssh, 'echo 1')
 			out = stdout.read().strip()
-			print 'OUT:', out
 			if out == '1':
 				break
 		except:
 			pass
 		time.sleep(1)
-	return True
-		
+	return ssh
+
 
 ####### MAIN #######
 if __name__ == '__main__':
@@ -171,7 +167,7 @@ if __name__ == '__main__':
 	group = create_security_group(conn, hash)
 
 	#nit = len(INSTTYPES)
-	nit = 2
+	nit = 1
 	sheet = numpy.zeros(shape=(nit,nit), dtype=int)
 
 	for ci in xrange(0, nit):
@@ -179,25 +175,32 @@ if __name__ == '__main__':
 		cinst = create_instance(
 			conn, hash, ctype, IMAGES[ctype], keypair['name'], 
 			group['name'], args.zone, wait=True)
+		cssh = wait_ssh_init(cinst, keypair['path'])
+		install_iperf(cssh)
 
 		for si in xrange(0, nit):
 			stype = INSTTYPES[si]
 			sinst = create_instance(
 				conn, hash, stype, IMAGES[stype], keypair['name'], 
 				group['name'], args.zone, wait=True)
+			sssh = wait_ssh_init(sinst, keypair['path'])
+			install_iperf(sssh)
+			start_iperf_server(sssh)
+			sheet[ci, si] = iperf(cssh, sinst.dns_name)
+			terminate_instance(sinst, wait=False)
 
-			sheet[ci, si] = iperf(cinst.dns_name, keypair['path'], sinst.dns_name)
-
-			terminate_instance(cinst, wait=False)
-		terminate_instance(sinst, wait=True)
+		terminate_instance(cinst, wait=True)
 
 	# TODO: inicializar instancias antes de rodar o teste para ir mais rapido
+	# TODO: reaproveitar instancias criadas
 	# TODO: separar logica de inicializacao das instancias para usar em outros testes
 	# TODO: fazer try catch pra um clean-exit por aqui
 	# TODO: remover arquivo pem 
+
+	print sheet
+
+	time.sleep(60)
 	
 	print "Cleaning up group and keypair"
 	group['obj'].delete()
 	keypair['obj'].delete()
-
-	print sheet
