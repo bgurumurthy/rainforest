@@ -112,19 +112,13 @@ def install_iperf(ssh):
 def start_iperf_server(ssh):
 	stdout, stderr, status = ssh_exec(ssh, 'iperf -D -s', wait=False)
 
+def keep_ssh_alive(ssh):
+	stdout, stderr, status = ssh_exec(ssh, 'echo 1', wait=False)
+
 def iperf(ssh, server):
 	stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
-	return int(stdout.read().strip().split(',')[-1])
-
-# TODO: fix this - not working 100%
-# Change to ssh trials since console output takes long to be available
-#def wait_cloud_init(instance):
-#	print "Waiting instance %s to be ready" % instance
-#	match = None
-#	while match == None:
-#		out = instance.get_console_output().output
-#		match = re.search('cloud-init boot finished', out)
-#		time.sleep(1)
+	out = stdout.read().strip()
+	return int(out.split(',')[-1])
 
 def wait_ssh_init(instance, key):
 	print "Waiting instance %s to have ssh started" % instance
@@ -166,8 +160,8 @@ if __name__ == '__main__':
 	keypair = create_keypair(conn, hash)
 	group = create_security_group(conn, hash)
 
-	#nit = len(INSTTYPES)
-	nit = 1
+	nit = len(INSTTYPES)
+	#nit = 2
 	sheet = numpy.zeros(shape=(nit,nit), dtype=int)
 
 	for ci in xrange(0, nit):
@@ -176,16 +170,21 @@ if __name__ == '__main__':
 			conn, hash, ctype, IMAGES[ctype], keypair['name'], 
 			group['name'], args.zone, wait=True)
 		cssh = wait_ssh_init(cinst, keypair['path'])
+		print "Installing iperf on ", cinst
 		install_iperf(cssh)
 
 		for si in xrange(0, nit):
+			keep_ssh_alive(cssh)
 			stype = INSTTYPES[si]
 			sinst = create_instance(
 				conn, hash, stype, IMAGES[stype], keypair['name'], 
 				group['name'], args.zone, wait=True)
 			sssh = wait_ssh_init(sinst, keypair['path'])
+			print "Installing iperf on ", sinst
 			install_iperf(sssh)
+			print "Starting iperf server on" , sinst
 			start_iperf_server(sssh)
+			print "Running iperf from %s to %s" % (cinst, sinst)
 			sheet[ci, si] = iperf(cssh, sinst.dns_name)
 			terminate_instance(sinst, wait=False)
 
