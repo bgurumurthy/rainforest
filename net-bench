@@ -47,18 +47,14 @@ def create_hash():
 	hash = random.getrandbits(32)
 	return "%08X" % hash
 
-def create_keypair(ec2, hash):
-	name = 'kpnb_%s' % hash
-	print "Creating keypair %s" % name
+def create_keypair(ec2, name):
 	keypair = ec2.create_key_pair(name)
 	dir = '/tmp'
 	keypair.save(dir)
 	path = "%s/%s.pem" % (dir, name)
 	return { 'name': name, 'path': path, 'obj': keypair }
 
-def create_security_group(ec2, hash):
-	name = "sgnb_%s" % hash
-	print "Creating security group %s" % name
+def create_security_group(ec2, name):
 	group =  conn.create_security_group(name, 'Network benchmark group')
 	group.authorize(src_group=group)
 	group.authorize(ip_protocol='tcp', from_port='22', to_port='22', 
@@ -69,9 +65,7 @@ def create_security_group(ec2, hash):
 		cidr_ip='0.0.0.0/0')
 	return { 'name': name, 'obj': group }
 
-def create_instance(ec2, hash, instancetype, image, keyname, secgroup, zone, 
-		wait=True):
-	print "Creating instance of type %s with image %s" % (instancetype, image)
+def create_instance(ec2, instancetype, image, keyname, secgroup, zone):
 	reserv = ec2.run_instances(
 				image, 
 				key_name = keyname, 
@@ -79,23 +73,19 @@ def create_instance(ec2, hash, instancetype, image, keyname, secgroup, zone,
 				instance_type = instancetype, 
 				placement = zone, 
 				instance_initiated_shutdown_behavior = 'terminate')
-	time.sleep(3)
+	while len(reserv.instances) != 1:
+		time.sleep(1)
 	instance = reserv.instances[0]
-	if wait:
-		print "Waiting instance %s to be running" % instance
-		while not instance.update() == 'running':
-			time.sleep(1)
-	instance.add_tag('Name', 'iperf_%s' % hash)
 	return instance
 
-def terminate_instance(instance, wait=True):
-	print "Terminating instance %s" % instance
+def is_instance_running(instance):
+	return instance.update() == 'running'
+
+def is_instance_terminated(instance):
+	return instance.update() == 'terminated'
+
+def terminate_instance(instance):
 	instance.terminate()
-	if wait:
-		print "Waiting instance %s to be terminated" % instance
-		while not instance.update() == 'terminated':
-			time.sleep(1)
-	return instance
 
 def ssh_exec(ssh, cmd, wait=True):
 	stdin, stdout, stderr = ssh.exec_command(cmd)
@@ -118,25 +108,36 @@ def keep_ssh_alive(ssh):
 def iperf(ssh, server):
 	stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
 	out = stdout.read().strip()
-	return int(out.split(',')[-1])
+	err = stdout.read().strip()
+	print "OUT = '%s', ERR = '%s', STATUS = %d" % (out, err, status)
+	try:
+		res = int(out.split(',')[-1])
+		return res
+	except:
+		pass
+	return None
 
-def wait_ssh_init(instance, key):
-	print "Waiting instance %s to have ssh started" % instance
+def connect_ssh(instance, key):
 	ssh = paramiko.SSHClient()
 	ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-	while True:
-		try:
-			ssh.connect(instance.dns_name, username='ubuntu', 
-				key_filename=key, timeout=2)
-			ssh.get_transport().set_keepalive(5)
-			stdout, stderr, status = ssh_exec(ssh, 'echo 1')
-			out = stdout.read().strip()
-			if out == '1':
-				break
-		except:
-			pass
-		time.sleep(1)
+	try:
+		ssh.connect(instance.dns_name, username='ubuntu', 
+			key_filename=key, timeout=2)
+		ssh.get_transport().set_keepalive(5)
+	except:
+		return None
 	return ssh
+
+def is_ssh_ready(instance, key):
+	ssh = connect_ssh(instance, key)
+	if ssh is None:
+		return False
+	try:
+		stdout, stderr, status = ssh_exec(ssh, 'echo 1')
+		out = stdout.read().strip()
+		return out == '1'
+	except:
+		return False
 
 
 ####### MAIN #######
@@ -157,49 +158,94 @@ if __name__ == '__main__':
 
 	# initialize
 	hash = create_hash()
-	keypair = create_keypair(conn, hash)
-	group = create_security_group(conn, hash)
 
+	name = 'kpnb_%s' % hash
+	print "Creating keypair %s" % name
+	keypair = create_keypair(conn, name)
+
+	name = "sgnb_%s" % hash
+	print "Creating security group %s" % name
+	group = create_security_group(conn, name)
+
+	print "Creating instances..."
+	instances = []
+	for it in INSTTYPES:
+		print "\tCreating type %s, image %s... " % (it, IMAGES[it]),
+		instance = create_instance(
+			conn, it, IMAGES[it], 
+			keypair['name'], group['name'], args.zone)
+		print instance
+		instances.append(instance)
+
+	print "Waiting for all instances to be running and have ssh ready..."
+	waiting = list(instances)
+	while len(waiting) > 0:
+		for instance in waiting:
+			if not is_instance_running(instance):
+				continue
+			if not is_ssh_ready(instance, keypair['path']):
+				continue
+			instance.add_tag('Name', 'nb_%s' % hash)
+			waiting.remove(instance)
+			print "\t%s is ready, %d to go" % (instance, len(waiting))
+		time.sleep(2)
+
+	# save all connections here
+	sshs = []
+
+	# install iperf on all instances and start server
+	print "Installing iperf and starting servers..."
+	for instance in instances:
+		print "\tCreating ssh connection to %s" % instance
+		ssh = connect_ssh(instance, keypair['path'])
+		print "\tInstalling iperf on %s" % instance
+		install_iperf(ssh)
+		print "\tStarting iperf on %s" % instance
+		start_iperf_server(ssh)
+		# save ssh conn
+		sshs.append(ssh)
+
+	# initialize sheet
 	nit = len(INSTTYPES)
-	#nit = 2
-	sheet = numpy.zeros(shape=(nit,nit), dtype=int)
+	sheet = numpy.empty(shape=(nit+1, nit+1), dtype=object)
+	for i in range(0, nit):
+		sheet[i+1, 0] = sheet[0, i+1] = INSTTYPES[i]
 
-	for ci in xrange(0, nit):
-		ctype = INSTTYPES[ci]
-		cinst = create_instance(
-			conn, hash, ctype, IMAGES[ctype], keypair['name'], 
-			group['name'], args.zone, wait=True)
-		cssh = wait_ssh_init(cinst, keypair['path'])
-		print "Installing iperf on ", cinst
-		install_iperf(cssh)
+	# run iperf
+	print "Running iperf..."
+	for ci in range(0, nit):
+		client = instances[ci]
+		cssh = sshs[ci]
+		for si in range(0, nit):
+			server = instances[si]
+			if client == server:
+				continue
+			print "\tRunning iperf from %s to %s... " % (client, server),
+			result = iperf(cssh, server.dns_name)
+			print result
+			sheet[ci+1, si+1] = result
 
-		for si in xrange(0, nit):
-			keep_ssh_alive(cssh)
-			stype = INSTTYPES[si]
-			sinst = create_instance(
-				conn, hash, stype, IMAGES[stype], keypair['name'], 
-				group['name'], args.zone, wait=True)
-			sssh = wait_ssh_init(sinst, keypair['path'])
-			print "Installing iperf on ", sinst
-			install_iperf(sssh)
-			print "Starting iperf server on" , sinst
-			start_iperf_server(sssh)
-			print "Running iperf from %s to %s" % (cinst, sinst)
-			sheet[ci, si] = iperf(cssh, sinst.dns_name)
-			terminate_instance(sinst, wait=False)
+	# terminate all instances
+	for instance in instances:
+		print "Terminating instance %s" % instance
+		terminate_instance(instance)
 
-		terminate_instance(cinst, wait=True)
+	# wait for all instances to be terminated
+	print "Waiting instances to terminate..."
+	waiting = list(instances)
+	while len(waiting) > 0:
+		for instance in waiting:
+			if is_instance_terminated(instance) is False:
+				continue
+			print "\t%s is terminated, %d to go" % (instance, len(waiting))
+			waiting.remove(instance)
+		time.sleep(1)
 
-	# TODO: inicializar instancias antes de rodar o teste para ir mais rapido
-	# TODO: reaproveitar instancias criadas
-	# TODO: separar logica de inicializacao das instancias para usar em outros testes
 	# TODO: fazer try catch pra um clean-exit por aqui
 	# TODO: remover arquivo pem 
 
 	print sheet
 
-	time.sleep(60)
-	
 	print "Cleaning up group and keypair"
 	group['obj'].delete()
 	keypair['obj'].delete()
