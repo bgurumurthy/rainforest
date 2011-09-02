@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 
 import sys
-
-if sys.version_info < (2, 7):
-	raise Exception('Required python 2.7 or newer')
-
 import boto.ec2
 import time
 import random
 import numpy
 import paramiko
 import re
+import os
+
+try:
+	import json
+except ImportError:
+	import simplejson as json
 
 from argparse import ArgumentParser
 
@@ -96,7 +98,7 @@ def ssh_exec(ssh, cmd, wait=True):
 	return (stdout, stderr, status)
 
 def install_iperf(ssh):
-	stdout, stderr, status = ssh_exec(ssh, 'TERM=vt100 sudo apt-get install -qy iperf')
+	stdout, stderr, status = ssh_exec(ssh, 'sudo apt-get install -qy iperf')
 	return status
 
 def start_iperf_server(ssh):
@@ -109,11 +111,13 @@ def iperf(ssh, server):
 	stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
 	out = stdout.read().strip()
 	err = stdout.read().strip()
-	print "OUT = '%s', ERR = '%s', STATUS = %d" % (out, err, status)
 	try:
 		res = int(out.split(',')[-1])
 		return res
 	except:
+		print >> sys.stderr, "OUT = '%s'" % out
+		print >> sys.stderr, "ERR = '%s'" % err
+		print >> sys.stderr, "STATUS = %d" % status
 		pass
 	return None
 
@@ -147,16 +151,15 @@ if __name__ == '__main__':
 	parser.add_argument('--secret-key', required=True, help='AWS Secret Key')
 	parser.add_argument('--region', required=True, help='AWS Region')
 	parser.add_argument('--zone', required=True, help='AWS Zone')
+	parser.add_argument('--output', required=True, help='JSON output filename')
 	parser.add_argument('--version', action='version', version='0.0.1')
 	args = parser.parse_args()
 
-	# connect to EC2
 	conn = boto.ec2.connect_to_region(
 				args.region, 
 				aws_access_key_id=args.access_key, 
 				aws_secret_access_key=args.secret_key)
 
-	# initialize
 	hash = create_hash()
 
 	name = 'kpnb_%s' % hash
@@ -170,11 +173,11 @@ if __name__ == '__main__':
 	print "Creating instances..."
 	instances = []
 	for it in INSTTYPES:
-		print "\tCreating type %s, image %s... " % (it, IMAGES[it]),
+		print "* Creating type %s, image %s... " % (it, IMAGES[it]),
 		instance = create_instance(
 			conn, it, IMAGES[it], 
 			keypair['name'], group['name'], args.zone)
-		print instance
+		print instance.id
 		instances.append(instance)
 
 	print "Waiting for all instances to be running and have ssh ready..."
@@ -187,20 +190,17 @@ if __name__ == '__main__':
 				continue
 			instance.add_tag('Name', 'nb_%s' % hash)
 			waiting.remove(instance)
-			print "\t%s is ready, %d to go" % (instance, len(waiting))
+			print "* %s is ready, %d to go" % (instance.id, len(waiting))
 		time.sleep(2)
 
-	# save all connections here
 	sshs = []
-
-	# install iperf on all instances and start server
 	print "Installing iperf and starting servers..."
 	for instance in instances:
-		print "\tCreating ssh connection to %s" % instance
+		print "* Creating ssh connection to %s" % instance.id
 		ssh = connect_ssh(instance, keypair['path'])
-		print "\tInstalling iperf on %s" % instance
+		print "* Installing iperf on %s" % instance.id
 		install_iperf(ssh)
-		print "\tStarting iperf on %s" % instance
+		print "* Starting iperf on %s" % instance.id
 		start_iperf_server(ssh)
 		# save ssh conn
 		sshs.append(ssh)
@@ -211,7 +211,6 @@ if __name__ == '__main__':
 	for i in range(0, nit):
 		sheet[i+1, 0] = sheet[0, i+1] = INSTTYPES[i]
 
-	# run iperf
 	print "Running iperf..."
 	for ci in range(0, nit):
 		client = instances[ci]
@@ -220,32 +219,34 @@ if __name__ == '__main__':
 			server = instances[si]
 			if client == server:
 				continue
-			print "\tRunning iperf from %s to %s... " % (client, server),
+			print "* Iperf from %s to %s =" % (client.id, server.id),
 			result = iperf(cssh, server.dns_name)
 			print result
 			sheet[ci+1, si+1] = result
 
-	# terminate all instances
+	print "Saving json to output file..."
+	with open(args.output, 'w') as f:
+		f.write(json.dumps(sheet.tolist()))
+		f.write("\n")
+
+	print "Terminating all created instances..."
 	for instance in instances:
-		print "Terminating instance %s" % instance
+		print "Terminating instance %s" % instance.id
 		terminate_instance(instance)
 
-	# wait for all instances to be terminated
 	print "Waiting instances to terminate..."
 	waiting = list(instances)
 	while len(waiting) > 0:
 		for instance in waiting:
 			if is_instance_terminated(instance) is False:
 				continue
-			print "\t%s is terminated, %d to go" % (instance, len(waiting))
 			waiting.remove(instance)
+			print "* %s is terminated, %d to go" % (instance.id, len(waiting))
 		time.sleep(1)
 
 	# TODO: fazer try catch pra um clean-exit por aqui
-	# TODO: remover arquivo pem 
 
-	print sheet
-
-	print "Cleaning up group and keypair"
+	print "Cleaning up group and keypair..."
 	group['obj'].delete()
 	keypair['obj'].delete()
+	os.remove(keypair['path'])
