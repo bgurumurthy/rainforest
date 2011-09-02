@@ -4,5 +4,4 @@
 	--access-key $1 \
 	--secret-key $2 \
 	--region us-east-1 \
-	--zone us-east-1c \
-	--output iperf.`date +"%Y%m%d%H%M%S"`.json
+	--zone us-east-1a

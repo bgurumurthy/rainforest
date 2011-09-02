@@ -17,6 +17,11 @@ except ImportError:
 
 from argparse import ArgumentParser
 
+about = """
+This script creates a set of EC2 instances and run iperf between them,
+saving it's output in a json file with timestamp and zone it was run.
+"""
+
 INSTTYPES = [
 	'm1.small',
 	'm1.large',
@@ -144,12 +149,11 @@ def is_ssh_ready(instance, key):
 
 ####### MAIN #######
 if __name__ == '__main__':
-	parser = ArgumentParser(description='nothing')
+	parser = ArgumentParser(description=about)
 	parser.add_argument('--access-key', required=True, help='AWS Access Key')
 	parser.add_argument('--secret-key', required=True, help='AWS Secret Key')
 	parser.add_argument('--region', required=True, help='AWS Region')
 	parser.add_argument('--zone', required=True, help='AWS Zone')
-	parser.add_argument('--output', required=True, help='JSON output filename')
 	parser.add_argument('--version', action='version', version='0.0.1')
 	args = parser.parse_args()
 
@@ -172,16 +176,22 @@ if __name__ == '__main__':
 	instances = []
 	for it in INSTTYPES:
 		print "* Creating type %s, image %s... " % (it, IMAGES[it]),
-		instance = create_instance(
-			conn, it, IMAGES[it], 
-			keypair['name'], group['name'], args.zone)
-		print instance.id
+		try:
+			instance = create_instance(conn, it, IMAGES[it], 
+				keypair['name'], group['name'], args.zone)
+			print instance.id
+		except:
+			instance = None
+			print 'ERROR'
 		instances.append(instance)
 
 	print "Waiting for all instances to be running and have ssh ready..."
 	waiting = list(instances)
 	while len(waiting) > 0:
 		for instance in waiting:
+			if instance is None:
+				waiting.remove(instance)
+				continue
 			if not is_instance_running(instance):
 				continue
 			if not is_ssh_ready(instance, keypair['path']):
@@ -194,6 +204,8 @@ if __name__ == '__main__':
 	sshs = []
 	print "Installing iperf and starting servers..."
 	for instance in instances:
+		if instance is None:
+			continue
 		print "* Creating ssh connection to %s" % instance.id
 		ssh = connect_ssh(instance, keypair['path'])
 		print "* Installing iperf on %s" % instance.id
@@ -212,9 +224,13 @@ if __name__ == '__main__':
 	print "Running iperf..."
 	for ci in range(0, nit):
 		client = instances[ci]
+		if client is None:
+			continue
 		cssh = sshs[ci]
 		for si in range(0, nit):
 			server = instances[si]
+			if server is None:
+				continue
 			if client == server:
 				continue
 			print "* Iperf from %s to %s =" % (client.id, server.id),
@@ -222,13 +238,17 @@ if __name__ == '__main__':
 			print result
 			sheet[ci+1, si+1] = result
 
-	print "Saving json to output file..."
-	with open(args.output, 'w') as f:
+	timestamp = time.strftime('%Y%m%d%H%M%S')
+	fname = "iperf-%s.%s.%s.json" % (hash, args.zone, timestamp)
+	print "Saving results to '%s'..." % fname
+	with open(fname, 'w') as f:
 		f.write(json.dumps(sheet.tolist()))
 		f.write("\n")
 
 	print "Terminating all created instances..."
 	for instance in instances:
+		if instance is None:
+			continue
 		print "Terminating instance %s" % instance.id
 		terminate_instance(instance)
 
@@ -236,6 +256,9 @@ if __name__ == '__main__':
 	waiting = list(instances)
 	while len(waiting) > 0:
 		for instance in waiting:
+			if instance is None:
+				waiting.remove(instance)
+				continue
 			if is_instance_terminated(instance) is False:
 				continue
 			waiting.remove(instance)
