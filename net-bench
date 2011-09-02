@@ -8,6 +8,7 @@ import numpy
 import paramiko
 import re
 import os
+import signal
 
 try:
 	import json
@@ -108,17 +109,14 @@ def keep_ssh_alive(ssh):
 	stdout, stderr, status = ssh_exec(ssh, 'echo 1', wait=False)
 
 def iperf(ssh, server):
-	stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
-	out = stdout.read().strip()
-	err = stdout.read().strip()
-	try:
-		res = int(out.split(',')[-1])
-		return res
-	except:
-		print >> sys.stderr, "OUT = '%s'" % out
-		print >> sys.stderr, "ERR = '%s'" % err
-		print >> sys.stderr, "STATUS = %d" % status
-		pass
+	# try 3 times - TODO: fix this. why iperf fails sometimes?
+	for i in range(0, 3):
+		stdout, stderr, status = ssh_exec(ssh, "iperf -yc -t30 -c %s" % server)
+		out = stdout.read().strip()
+		err = stdout.read().strip()
+		if status == 0:
+			return int(out.split(',')[-1])
+		time.sleep(1)
 	return None
 
 def connect_ssh(instance, key):
@@ -244,9 +242,9 @@ if __name__ == '__main__':
 			print "* %s is terminated, %d to go" % (instance.id, len(waiting))
 		time.sleep(1)
 
-	# TODO: fazer try catch pra um clean-exit por aqui
-
 	print "Cleaning up group and keypair..."
 	group['obj'].delete()
 	keypair['obj'].delete()
 	os.remove(keypair['path'])
+
+# TODO: add signal handling to stop tests
