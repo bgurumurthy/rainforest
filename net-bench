@@ -87,10 +87,16 @@ def create_instance(ec2, instancetype, image, keyname, secgroup, zone):
 	return instance
 
 def is_instance_running(instance):
-	return instance.update() == 'running'
+	try:
+		return instance.update() == 'running'
+	except boto.exception.BotoServerError as bse:
+		return false
 
 def is_instance_terminated(instance):
-	return instance.update() == 'terminated'
+	try:
+		return instance.update() == 'terminated'
+	except boto.exception.BotoServerError as bse:
+		return false
 
 def terminate_instance(instance):
 	instance.terminate()
@@ -124,19 +130,22 @@ def iperf(ssh, server):
 		time.sleep(1)
 	return None
 
-def connect_ssh(instance, key):
+def connect_ssh(instance, key, retries=3):
 	ssh = paramiko.SSHClient()
 	ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-	try:
-		ssh.connect(instance.dns_name, username='ubuntu', 
-			key_filename=key, timeout=2)
-		ssh.get_transport().set_keepalive(5)
-	except:
-		return None
-	return ssh
+	for i in range(0, retries):
+		try:
+			ssh.connect(instance.dns_name, username='ubuntu', 
+				key_filename=key, timeout=5)
+			ssh.get_transport().set_keepalive(5)
+			return ssh
+		except Exception as ex:
+			pass
+		time.sleep(1)
+	return None
 
 def is_ssh_ready(instance, key):
-	ssh = connect_ssh(instance, key)
+	ssh = connect_ssh(instance, key, 1)
 	if ssh is None:
 		return False
 	try:
@@ -154,7 +163,7 @@ if __name__ == '__main__':
 	parser.add_argument('--secret-key', required=True, help='AWS Secret Key')
 	parser.add_argument('--region', required=True, help='AWS Region')
 	parser.add_argument('--zone', required=True, help='AWS Zone')
-	parser.add_argument('--version', action='version', version='0.0.1')
+	parser.add_argument('--version', action='version', version='0.0.2')
 	args = parser.parse_args()
 
 	conn = boto.ec2.connect_to_region(
@@ -205,6 +214,7 @@ if __name__ == '__main__':
 	print "Installing iperf and starting servers..."
 	for instance in instances:
 		if instance is None:
+			sshs.append(None)
 			continue
 		print "* Creating ssh connection to %s" % instance.id
 		ssh = connect_ssh(instance, keypair['path'])
@@ -214,6 +224,7 @@ if __name__ == '__main__':
 		start_iperf_server(ssh)
 		# save ssh conn
 		sshs.append(ssh)
+
 
 	# initialize sheet
 	nit = len(INSTTYPES)
@@ -271,3 +282,4 @@ if __name__ == '__main__':
 	os.remove(keypair['path'])
 
 # TODO: add signal handling to stop tests
+# TODO: add better exception handling to cleanup all mess

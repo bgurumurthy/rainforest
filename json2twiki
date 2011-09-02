@@ -1,0 +1,44 @@
+#!/usr/bin/env python
+
+import sys
+
+try:
+	import json
+except ImportError:
+	import simplejson as json
+
+from argparse import ArgumentParser
+
+about = """
+This script reads a json file containing a dump from a ndarray and generates a 
+Twiki compatible table.
+"""
+
+####### MAIN #######
+if __name__ == '__main__':
+	parser = ArgumentParser(description=about)
+	parser.add_argument('--divide', type=int, default=1, help='If specified, divide every value by this divisor')
+	parser.add_argument('--decimals', type=int, default=2, help='Decimals')
+	parser.add_argument('json_file', help='JSON file')
+	args = parser.parse_args()
+
+	with open(args.json_file, 'r') as f:
+		jsonstr = f.read()
+		sheet = json.loads(jsonstr)
+
+	for rowid in range(0, len(sheet)):
+		for colid in range(0, len(sheet)):
+			if colid == 0 or rowid == 0:
+				bold = '*'
+			else:
+				bold = ''
+			val = sheet[colid][rowid]
+			if val is None:
+				val = '-'
+			elif isinstance(val, (long, int)):
+				num = float(val) / float(args.divide)
+				fmt = '%%0.%(#)df' % {'#': args.decimals}
+				val = fmt % num
+			sys.stdout.write("|%(bold)s%(val)s%(bold)s" % { 'bold': bold, 'val': val })
+		sys.stdout.write("|\n")
+
