@@ -1,0 +1,3 @@
+   * Extract single-benchmark logic
+   * Modularize functions to reuse them on another benchmarks
+   * Create another benchmarks

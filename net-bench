@@ -180,9 +180,9 @@ if __name__ == '__main__':
 			instance = create_instance(conn, it, IMAGES[it], 
 				keypair['name'], group['name'], args.zone)
 			print instance.id
-		except:
+		except boto.exception.BotoServerError as bse:
 			instance = None
-			print 'ERROR'
+			print bse.error_message
 		instances.append(instance)
 
 	print "Waiting for all instances to be running and have ssh ready..."
